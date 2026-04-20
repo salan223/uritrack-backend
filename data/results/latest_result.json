@@ -1,0 +1,31 @@
+{
+  "ok": true,
+  "timestamp": "20260419_202415",
+  "filename": "capture_20260419_202415.jpg",
+  "image_path": "data/raw/capture_20260419_202415.jpg",
+  "image_url": "http://10.0.0.119:8000/image/capture_20260419_202415.jpg",
+  "analysis": {
+    "valid": true,
+    "change_detected": true,
+    "change_score": 100.0,
+    "diagnosis": "Strong visible change detected on the strip",
+    "detected_band_count": 1,
+    "primary_band_y": 127,
+    "primary_band_strength": 1.0,
+    "bands": [
+      {
+        "center_y": 127,
+        "width": 41,
+        "strength_raw": 0.618,
+        "strength_norm": 0.6853,
+        "peak_norm": 1.0
+      }
+    ],
+    "active_region_box": {
+      "x1": 39,
+      "y1": 123,
+      "x2": 117,
+      "y2": 344
+    }
+  }
+}
