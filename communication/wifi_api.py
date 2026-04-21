@@ -1,21 +1,26 @@
 from flask import Flask, jsonify, send_from_directory
 from datetime import datetime
+from pathlib import Path
 import json
-import os
+import sys
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
 from camera.capture import capture_image
 from processing.analyze import analyze_image
 
 app = Flask(__name__)
 
-RESULTS_DIR = "data/results"
-RAW_DIR = "data/raw"
+RESULTS_DIR = BASE_DIR / "data" / "results"
+RAW_DIR = BASE_DIR / "data" / "raw"
 
-os.makedirs(RESULTS_DIR, exist_ok=True)
-os.makedirs(RAW_DIR, exist_ok=True)
 
-LATEST_RESULT_PATH = os.path.join(RESULTS_DIR, "latest_result.json")
-RESULTS_LOG_PATH = os.path.join(RESULTS_DIR, "results_log.jsonl")
+
+
+LATEST_RESULT_PATH = RESULTS_DIR / "latest_result.json"
+RESULTS_LOG_PATH = RESULTS_DIR / "results_log.jsonl"
 
 
 def save_result(result: dict):
@@ -36,12 +41,12 @@ def health():
 
 @app.route("/image/<filename>", methods=["GET"])
 def get_image(filename):
-    return send_from_directory(RAW_DIR, filename)
+    return send_from_directory(str(RAW_DIR), filename)
 
 
 @app.route("/latest-result", methods=["GET"])
 def latest_result():
-    if not os.path.exists(LATEST_RESULT_PATH):
+    if not LATEST_RESULT_PATH.exists():
         return jsonify({
             "ok": False,
             "error": "No result available yet"

@@ -11,22 +11,25 @@ def smooth_signal(signal, kernel_size=21):
     return np.convolve(signal, kernel, mode="same")
 
 
+def robust_std(x):
+    x = np.asarray(x, dtype=np.float32)
+    med = np.median(x)
+    mad = np.median(np.abs(x - med))
+    return 1.4826 * mad + 1e-6
+
+
 def detect_strip_roi(image):
-    """
-    Detect the bright strip against the darker background.
-    Returns a cropped ROI containing the strip.
-    """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    # Bright strip threshold
     _, thresh = cv2.threshold(gray, 170, 255, cv2.THRESH_BINARY)
 
-    # Clean up noise
     kernel = np.ones((5, 5), np.uint8)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(
+        thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
 
     if not contours:
         raise ValueError("No bright strip detected")
@@ -39,7 +42,6 @@ def detect_strip_roi(image):
         area = w * h
         aspect = h / max(w, 1)
 
-        # Prefer tall bright objects near the center
         cx = x + w / 2
         center_distance = abs(cx - (w_img / 2))
 
@@ -50,7 +52,6 @@ def detect_strip_roi(image):
         largest = max(contours, key=cv2.contourArea)
         x, y, w, h = cv2.boundingRect(largest)
     else:
-        # Bigger area and closer to center is better
         candidates.sort(key=lambda item: (-item[1], item[2]))
         _, _, _, x, y, w, h = candidates[0]
 
@@ -67,16 +68,11 @@ def detect_strip_roi(image):
 
 
 def extract_active_strip_region(strip_roi):
-    """
-    Focus analysis on the lower central portion of the strip where visible changes/bands occur.
-    """
     h, w = strip_roi.shape[:2]
 
-    # Ignore outer edges; use central width
     x1 = int(0.25 * w)
     x2 = int(0.75 * w)
 
-    # Ignore top handle/cassette area; focus more on lower portion
     y1 = int(0.35 * h)
     y2 = int(0.98 * h)
 
@@ -85,43 +81,34 @@ def extract_active_strip_region(strip_roi):
 
 
 def compute_darkness_profile(active_roi):
-    """
-    Compute a row-wise darkness/change profile on the bright strip.
-    A darker band on a white strip creates a positive peak in this profile.
-    """
     gray = cv2.cvtColor(active_roi, cv2.COLOR_BGR2GRAY).astype(np.float32)
 
-    # Average brightness for each row
     row_mean = np.mean(gray, axis=1)
-
-    # Smooth raw brightness
     row_mean_smooth = smooth_signal(row_mean, kernel_size=31)
-
-    # Local baseline: broader smooth estimate of the white strip brightness
     baseline = smooth_signal(row_mean_smooth, kernel_size=101)
 
-    # Darkness score = how much darker this row is than local baseline
     darkness = baseline - row_mean_smooth
-
-    # Clamp negatives
     darkness = np.maximum(darkness, 0)
 
-    # Normalize if possible
-    max_val = float(np.max(darkness))
-    if max_val > 1e-6:
-        darkness_norm = darkness / max_val
-    else:
-        darkness_norm = darkness.copy()
+    noise_floor = np.median(darkness)
+    noise_std = robust_std(darkness)
 
-    return row_mean_smooth, baseline, darkness, darkness_norm
+    darkness_score = (darkness - noise_floor) / noise_std
+    darkness_score = np.maximum(darkness_score, 0)
+
+    return {
+        "row_mean": row_mean,
+        "row_mean_smooth": row_mean_smooth,
+        "baseline": baseline,
+        "darkness": darkness,
+        "noise_floor": float(noise_floor),
+        "noise_std": float(noise_std),
+        "darkness_score": darkness_score,
+    }
 
 
-def find_band_clusters(darkness_norm, threshold=0.22, min_gap=10, min_len=4):
-    """
-    Find clusters of rows where darkness exceeds threshold.
-    These clusters correspond to visible changes/bands on the strip.
-    """
-    indices = np.where(darkness_norm > threshold)[0]
+def find_band_clusters(score_profile, threshold=2.5, min_gap=10, min_len=5):
+    indices = np.where(score_profile > threshold)[0]
 
     if len(indices) == 0:
         return []
@@ -133,36 +120,43 @@ def find_band_clusters(darkness_norm, threshold=0.22, min_gap=10, min_len=4):
     return clusters
 
 
-def summarize_bands(clusters, darkness, darkness_norm):
-    """
-    Turn row clusters into band summaries.
-    """
+def summarize_bands(clusters, darkness, score_profile):
     bands = []
 
     for c in clusters:
         center_y = int(np.mean(c))
         width = int(len(c))
-        strength_raw = float(np.mean(darkness[c]))
-        strength_norm = float(np.mean(darkness_norm[c]))
-        peak_norm = float(np.max(darkness_norm[c]))
+
+        peak_score = float(np.max(score_profile[c]))
+        mean_score = float(np.mean(score_profile[c]))
+        peak_darkness = float(np.max(darkness[c]))
+        mean_darkness = float(np.mean(darkness[c]))
+        area_score = float(np.sum(score_profile[c]))
 
         bands.append({
             "center_y": center_y,
             "width": width,
-            "strength_raw": round(strength_raw, 3),
-            "strength_norm": round(strength_norm, 4),
-            "peak_norm": round(peak_norm, 4),
+            "peak_score": round(peak_score, 3),
+            "mean_score": round(mean_score, 3),
+            "peak_darkness": round(peak_darkness, 3),
+            "mean_darkness": round(mean_darkness, 3),
+            "area_score": round(area_score, 3),
         })
 
-    bands.sort(key=lambda b: b["peak_norm"], reverse=True)
+    bands.sort(
+        key=lambda b: (
+            b["peak_score"] * 0.45 +
+            b["mean_score"] * 0.20 +
+            b["area_score"] * 0.25 +
+            b["mean_darkness"] * 0.10
+        ),
+        reverse=True
+    )
+
     return bands
 
 
 def classify_change(bands):
-    """
-    Convert detected band strength into a simple interpretation.
-    This does not assume a specific assay layout; it just measures visible change.
-    """
     if not bands:
         return {
             "valid": True,
@@ -172,21 +166,33 @@ def classify_change(bands):
         }
 
     strongest = bands[0]
-    score = float(strongest["peak_norm"]) * 100.0
 
-    if score >= 70:
+    peak_score = strongest["peak_score"]
+    mean_score = strongest["mean_score"]
+    area_score = strongest["area_score"]
+    width = strongest["width"]
+
+    combined = (
+        7.0 * peak_score +
+        3.5 * mean_score +
+        0.6 * area_score +
+        0.25 * width
+    )
+    change_score = float(min(combined, 100.0))
+
+    if change_score >= 60:
         diagnosis = "Strong visible change detected on the strip"
-    elif score >= 40:
+    elif change_score >= 32:
         diagnosis = "Moderate visible change detected on the strip"
-    elif score >= 18:
+    elif change_score >= 15:
         diagnosis = "Faint visible change detected on the strip"
     else:
         diagnosis = "No significant visible change detected on the strip"
 
     return {
         "valid": True,
-        "change_detected": score >= 18,
-        "change_score": round(score, 2),
+        "change_detected": change_score >= 15,
+        "change_score": round(change_score, 2),
         "diagnosis": diagnosis
     }
 
@@ -206,31 +212,48 @@ def analyze_image(path):
             "diagnosis": "Active strip region could not be extracted"
         }
 
-    row_mean, baseline, darkness, darkness_norm = compute_darkness_profile(active_roi)
+    profile = compute_darkness_profile(active_roi)
+
     clusters = find_band_clusters(
-        darkness_norm,
-        threshold=0.22,
+        profile["darkness_score"],
+        threshold=2.5,
         min_gap=10,
-        min_len=4
+        min_len=5
     )
-    bands = summarize_bands(clusters, darkness, darkness_norm)
+
+    bands = summarize_bands(
+        clusters,
+        profile["darkness"],
+        profile["darkness_score"]
+    )
 
     result = classify_change(bands)
 
     primary_band_y = bands[0]["center_y"] if bands else None
-    primary_band_strength = bands[0]["peak_norm"] if bands else 0.0
+    primary_band_peak_score = bands[0]["peak_score"] if bands else 0.0
+    primary_band_mean_darkness = bands[0]["mean_darkness"] if bands else 0.0
+    primary_band_peak_darkness = bands[0]["peak_darkness"] if bands else 0.0
+
+    # Realistic user-facing intensity: scaled from raw darkness, not normalized to 1.0
+    # Clamp to a practical 0-100 range for UI display.
+    realistic_intensity = min(primary_band_mean_darkness * 8.0, 100.0)
 
     result.update({
         "detected_band_count": len(bands),
         "primary_band_y": primary_band_y,
-        "primary_band_strength": round(primary_band_strength, 4),
-        "bands": bands[:3],  # top 3 only
+        "primary_band_peak_score": round(primary_band_peak_score, 4),
+        "primary_band_mean_darkness": round(primary_band_mean_darkness, 4),
+        "primary_band_peak_darkness": round(primary_band_peak_darkness, 4),
+        "realistic_intensity": round(realistic_intensity, 2),
+        "bands": bands[:3],
         "active_region_box": {
             "x1": int(active_box[0]),
             "y1": int(active_box[1]),
             "x2": int(active_box[2]),
             "y2": int(active_box[3]),
-        }
+        },
+        "noise_floor": round(profile["noise_floor"], 4),
+        "noise_std": round(profile["noise_std"], 4),
     })
 
     return result
