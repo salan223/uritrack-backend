@@ -18,6 +18,26 @@ def robust_std(x):
     return 1.4826 * mad + 1e-6
 
 
+def no_strip_result(message="No strip inserted. Please insert a test strip and try again."):
+    return {
+        "valid": False,
+        "strip_detected": False,
+        "change_detected": False,
+        "change_score": 0.0,
+        "diagnosis": message,
+        "realistic_intensity": 0.0,
+        "detected_band_count": 0,
+        "primary_band_y": None,
+        "primary_band_peak_score": 0.0,
+        "primary_band_mean_darkness": 0.0,
+        "primary_band_peak_darkness": 0.0,
+        "bands": [],
+        "active_region_box": None,
+        "noise_floor": 0.0,
+        "noise_std": 0.0,
+    }
+
+
 def detect_strip_roi(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
@@ -32,9 +52,10 @@ def detect_strip_roi(image):
     )
 
     if not contours:
-        raise ValueError("No bright strip detected")
+        raise ValueError("No strip inserted")
 
     h_img, w_img = gray.shape
+    img_area = h_img * w_img
     candidates = []
 
     for cnt in contours:
@@ -45,15 +66,24 @@ def detect_strip_roi(image):
         cx = x + w / 2
         center_distance = abs(cx - (w_img / 2))
 
-        if area > 5000 and aspect > 1.2:
+        area_ratio = area / max(img_area, 1)
+        touches_border = (
+            x <= 2 or y <= 2 or (x + w) >= (w_img - 2) or (y + h) >= (h_img - 2)
+        )
+
+        if (
+            area > 5000
+            and aspect > 1.2
+            and area_ratio > 0.015
+            and not touches_border
+        ):
             candidates.append((cnt, area, center_distance, x, y, w, h))
 
     if not candidates:
-        largest = max(contours, key=cv2.contourArea)
-        x, y, w, h = cv2.boundingRect(largest)
-    else:
-        candidates.sort(key=lambda item: (-item[1], item[2]))
-        _, _, _, x, y, w, h = candidates[0]
+        raise ValueError("No strip inserted")
+
+    candidates.sort(key=lambda item: (-item[1], item[2]))
+    _, _, _, x, y, w, h = candidates[0]
 
     pad_x = int(0.08 * w)
     pad_y = int(0.03 * h)
@@ -64,11 +94,18 @@ def detect_strip_roi(image):
     y2 = min(h_img, y + h + pad_y)
 
     roi = image[y1:y2, x1:x2]
+
+    if roi.size == 0:
+        raise ValueError("No strip inserted")
+
     return roi
 
 
 def extract_active_strip_region(strip_roi):
     h, w = strip_roi.shape[:2]
+
+    if h < 20 or w < 10:
+        return None, None
 
     x1 = int(0.25 * w)
     x2 = int(0.75 * w)
@@ -76,7 +113,14 @@ def extract_active_strip_region(strip_roi):
     y1 = int(0.35 * h)
     y2 = int(0.98 * h)
 
+    if x2 <= x1 or y2 <= y1:
+        return None, None
+
     active = strip_roi[y1:y2, x1:x2]
+
+    if active.size == 0:
+        return None, None
+
     return active, (x1, y1, x2, y2)
 
 
@@ -160,6 +204,7 @@ def classify_change(bands):
     if not bands:
         return {
             "valid": True,
+            "strip_detected": True,
             "change_detected": False,
             "change_score": 0.0,
             "diagnosis": "No significant visible change detected on the strip"
@@ -191,6 +236,7 @@ def classify_change(bands):
 
     return {
         "valid": True,
+        "strip_detected": True,
         "change_detected": change_score >= 15,
         "change_score": round(change_score, 2),
         "diagnosis": diagnosis
@@ -203,14 +249,17 @@ def analyze_image(path):
     if image is None:
         raise ValueError(f"Could not read image: {path}")
 
-    strip_roi = detect_strip_roi(image)
+    try:
+        strip_roi = detect_strip_roi(image)
+    except ValueError:
+        return no_strip_result()
+
     active_roi, active_box = extract_active_strip_region(strip_roi)
 
-    if active_roi.size == 0:
-        return {
-            "valid": False,
-            "diagnosis": "Active strip region could not be extracted"
-        }
+    if active_roi is None or active_box is None or active_roi.size == 0:
+        return no_strip_result(
+            "Strip was not detected clearly. Please reinsert the strip and try again."
+        )
 
     profile = compute_darkness_profile(active_roi)
 
@@ -234,8 +283,6 @@ def analyze_image(path):
     primary_band_mean_darkness = bands[0]["mean_darkness"] if bands else 0.0
     primary_band_peak_darkness = bands[0]["peak_darkness"] if bands else 0.0
 
-    # Realistic user-facing intensity: scaled from raw darkness, not normalized to 1.0
-    # Clamp to a practical 0-100 range for UI display.
     realistic_intensity = min(primary_band_mean_darkness * 8.0, 100.0)
 
     result.update({
@@ -257,5 +304,3 @@ def analyze_image(path):
     })
 
     return result
-
-
